@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { collection, query, where, onSnapshot, deleteDoc, doc, writeBatch, increment, getDocs } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, deleteDoc, doc, writeBatch, increment, getDocs, updateDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { motion, AnimatePresence } from 'motion/react';
 import { Search } from 'lucide-react';
@@ -7,8 +7,8 @@ import { Search } from 'lucide-react';
 interface PointsRequest {
   id: string;
   patient: string;
-  points: number;
-  reason: string;
+  pointsValue: number;
+  service: string;
   status: 'pending' | 'verified';
   createdAt?: any;
   date?: string;
@@ -27,6 +27,25 @@ export default function Dashboard() {
   const [queue, setQueue] = useState<PointsRequest[]>([]);
   const [directory, setDirectory] = useState<UserDirectory[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
+  const [selectedUser, setSelectedUser] = useState<UserDirectory | null>(null);
+  const [customPoints, setCustomPoints] = useState<string>("");
+  const [isAddPointsModalOpen, setIsAddPointsModalOpen] = useState(false);
+
+  const handleManualPointsInjection = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedUser || !customPoints || isNaN(Number(customPoints))) return;
+    try {
+      const userRef = doc(db, 'users', selectedUser.id);
+      await updateDoc(userRef, { pawPoints: increment(Number(customPoints)) });
+      setIsAddPointsModalOpen(false);
+      setCustomPoints("");
+      setSelectedUser(null);
+      fetchUsers();
+    } catch (error) {
+      console.error("Error adding manual points:", error);
+      alert("Failed to add points.");
+    }
+  };
 
   const fetchUsers = async () => {
     try {
@@ -83,7 +102,7 @@ export default function Dashboard() {
       // 2. Increment the user's Paw Points
       if (request.userId) {
         const userRef = doc(db, 'users', request.userId);
-        batch.update(userRef, { pawPoints: increment(request.points) });
+        batch.update(userRef, { pawPoints: increment(request.pointsValue || 0) });
       }
 
       // 3. Commit the transaction
@@ -215,7 +234,7 @@ export default function Dashboard() {
                           className="hover:bg-[#18181A] transition-colors group"
                         >
                           <td className="px-6 py-4 font-medium text-white">{request.patient || 'Unknown Patient'}</td>
-                          <td className="px-6 py-4 text-gray-500">{request.reason || 'No reason provided'}</td>
+                          <td className="px-6 py-4 text-gray-500">{request.service || 'No service provided'}</td>
                           <td className="px-6 py-4 text-gray-500 font-mono text-xs">
                             {request.date && request.time 
                               ? `${request.date} / ${request.time}`
@@ -224,7 +243,7 @@ export default function Dashboard() {
                                 : 'N/A'}
                           </td>
                           <td className="px-6 py-4 font-bold text-yellow-400 text-base drop-shadow-[0_0_8px_rgba(250,204,21,0.3)]">
-                            +{request.points || 0}
+                            +{request.pointsValue || 0}
                           </td>
                           <td className="px-6 py-4 text-right">
                             <div className="flex items-center justify-end gap-3 opacity-90 group-hover:opacity-100 transition-opacity">
@@ -279,7 +298,7 @@ export default function Dashboard() {
                     <th className="px-6 py-4">Pet Name</th>
                     <th className="px-6 py-4">Owner Email</th>
                     <th className="px-6 py-4">Lifetime Paw Points</th>
-                    <th className="px-6 py-4 text-right">CRM ID</th>
+                    <th className="px-6 py-4 text-right">Actions / CRM ID</th>
                   </tr>
                 </thead>
                 <motion.tbody className="divide-y divide-gray-800/50">
@@ -313,8 +332,17 @@ export default function Dashboard() {
                           <td className="px-6 py-4 font-bold text-yellow-500 drop-shadow-[0_0_8px_rgba(250,204,21,0.2)]">
                             {user.pawPoints || 0}
                           </td>
-                          <td className="px-6 py-4 text-right text-[10px] uppercase text-gray-600 font-mono tracking-widest">
-                            {user.id}
+                          <td className="px-6 py-4 text-right flex flex-col items-end gap-2">
+                            <span className="text-[10px] uppercase text-gray-600 font-mono tracking-widest">{user.id}</span>
+                            <button
+                              onClick={() => {
+                                setSelectedUser(user);
+                                setIsAddPointsModalOpen(true);
+                              }}
+                              className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-[#0A0A0A] bg-yellow-500 rounded border border-yellow-400 hover:bg-yellow-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-[#121212] focus:ring-yellow-500 transition-all shadow-[0_0_15px_rgba(250,204,21,0.15)]"
+                            >
+                              + Add Points
+                            </button>
                           </td>
                         </motion.tr>
                       ))
@@ -326,6 +354,62 @@ export default function Dashboard() {
           </div>
         </section>
       </main>
+
+      <AnimatePresence>
+        {isAddPointsModalOpen && selectedUser && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-[#121212] border border-gray-800 shadow-2xl rounded-2xl p-6 w-full max-w-sm relative"
+            >
+              <h3 className="text-xl font-bold text-white mb-2">Inject Paw Points</h3>
+              <p className="text-sm text-gray-400 mb-6">Patient: <span className="text-white font-semibold">{selectedUser.petName || 'Unknown'}</span></p>
+              
+              <form onSubmit={handleManualPointsInjection} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-gray-400 mb-1 uppercase tracking-wider">Points to Add</label>
+                  <input 
+                    type="number"
+                    value={customPoints}
+                    onChange={(e) => setCustomPoints(e.target.value)}
+                    placeholder="e.g. 500"
+                    className="w-full bg-[#1A1A1C] border border-gray-800 rounded-lg px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-yellow-500/50 focus:ring-1 focus:ring-yellow-500/50 transition-all text-lg font-bold"
+                    autoFocus
+                  />
+                </div>
+                
+                <div className="flex gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsAddPointsModalOpen(false);
+                      setCustomPoints("");
+                      setSelectedUser(null);
+                    }}
+                    className="flex-1 py-3 bg-transparent border border-gray-700 text-gray-300 font-bold rounded-xl hover:bg-gray-800 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={!customPoints || isNaN(Number(customPoints))}
+                    className="flex-1 py-3 bg-yellow-500 text-black font-bold rounded-xl hover:bg-yellow-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Confirm
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }
