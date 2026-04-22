@@ -1,0 +1,19 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Temporarily open for app testing and terminal read/write
+    match /requests/{document=**} {
+      allow read, write: if true; 
+    }
+    
+    // Temporarily open for legacy pointsQueue
+    match /pointsQueue/{document=**} {
+      allow read, write: if true;
+    }
+  }
+}
