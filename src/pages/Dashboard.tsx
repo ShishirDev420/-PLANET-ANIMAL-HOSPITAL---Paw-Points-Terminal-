@@ -1,12 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { collection, query, where, onSnapshot, deleteDoc, doc, writeBatch, increment, getDocs, updateDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search } from 'lucide-react';
+import { Search, PawPrint, Bell, X } from 'lucide-react';
+
+interface ToastNotification {
+  id: string;
+  patient: string;
+  service: string;
+  pointsValue: number;
+}
 
 interface PointsRequest {
   id: string;
-  patient: string;
+  patient?: string;
+  petName?: string;
   pointsValue: number;
   service: string;
   status: 'pending' | 'verified';
@@ -26,6 +34,24 @@ interface UserDirectory {
 export default function Dashboard() {
   const [queue, setQueue] = useState<PointsRequest[]>([]);
   const [directory, setDirectory] = useState<UserDirectory[]>([]);
+  const [toasts, setToasts] = useState<ToastNotification[]>([]);
+  const seenRequestIdsRef = useRef<Set<string>>(new Set());
+  const isInitialLoadRef = useRef(true);
+
+  const dismissToast = (toastId: string) => {
+    setToasts(prev => prev.filter(t => t.id !== toastId));
+  };
+
+  const addToast = (request: PointsRequest) => {
+    const toast: ToastNotification = {
+      id: request.id,
+      patient: request.patient || request.petName || 'Unknown Patient',
+      service: request.service || 'Service',
+      pointsValue: request.pointsValue || 0,
+    };
+    setToasts(prev => [toast, ...prev].slice(0, 5)); // max 5 toasts
+    setTimeout(() => dismissToast(request.id), 6000); // auto-dismiss after 6s
+  };
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedUser, setSelectedUser] = useState<UserDirectory | null>(null);
   const [customPoints, setCustomPoints] = useState<string>("");
@@ -68,8 +94,8 @@ export default function Dashboard() {
     );
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const requests: PointsRequest[] = [];
-      snapshot.forEach((doc) => {
-        requests.push({ id: doc.id, ...doc.data() } as PointsRequest);
+      snapshot.forEach((docSnap) => {
+        requests.push({ id: docSnap.id, ...docSnap.data() } as PointsRequest);
       });
       
       // Sort manually to prevent orderBy index failures inside Firebase
@@ -78,6 +104,20 @@ export default function Dashboard() {
         const timeB = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0;
         return timeB - timeA;
       });
+
+      // Detect truly NEW requests (not seen before) and fire toast notifications
+      if (isInitialLoadRef.current) {
+        // Seed the seen set on first load — don't toast for pre-existing items
+        requests.forEach(r => seenRequestIdsRef.current.add(r.id));
+        isInitialLoadRef.current = false;
+      } else {
+        requests.forEach(r => {
+          if (!seenRequestIdsRef.current.has(r.id)) {
+            seenRequestIdsRef.current.add(r.id);
+            addToast(r);
+          }
+        });
+      }
       
       setQueue(requests);
     }, (error) => {
@@ -233,7 +273,7 @@ export default function Dashboard() {
                           transition={{ type: "spring", stiffness: 400, damping: 30 }}
                           className="hover:bg-[#18181A] transition-colors group"
                         >
-                          <td className="px-6 py-4 font-medium text-white">{request.patient || 'Unknown Patient'}</td>
+                          <td className="px-6 py-4 font-medium text-white">{request.patient || request.petName || 'Unknown Patient'}</td>
                           <td className="px-6 py-4 text-gray-500">{request.service || 'No service provided'}</td>
                           <td className="px-6 py-4 text-gray-500 font-mono text-xs">
                             {request.date && request.time 
@@ -410,6 +450,62 @@ export default function Dashboard() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* 🐾 LIVE PAW POINTS NOTIFICATION TOASTS */}
+      <div className="fixed top-6 right-6 z-[200] flex flex-col gap-3 pointer-events-none">
+        <AnimatePresence mode="popLayout">
+          {toasts.map((toast) => (
+            <motion.div
+              key={toast.id}
+              layout
+              initial={{ opacity: 0, x: 80, scale: 0.9 }}
+              animate={{ opacity: 1, x: 0, scale: 1 }}
+              exit={{ opacity: 0, x: 80, scale: 0.9, transition: { duration: 0.2 } }}
+              transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+              className="pointer-events-auto w-[340px] bg-[#0E0E0E] border border-yellow-500/30 rounded-2xl shadow-[0_0_40px_rgba(250,204,21,0.15),0_8px_32px_rgba(0,0,0,0.6)] overflow-hidden"
+            >
+              {/* Yellow top accent line */}
+              <div className="h-1 w-full bg-gradient-to-r from-yellow-500 via-yellow-400 to-yellow-500 animate-pulse" />
+              
+              <div className="p-4 flex items-start gap-3">
+                {/* Paw icon with glow */}
+                <div className="relative shrink-0">
+                  <div className="absolute inset-0 bg-yellow-500/30 blur-xl rounded-full scale-150" />
+                  <div className="relative w-10 h-10 bg-yellow-500/10 border border-yellow-500/30 rounded-xl flex items-center justify-center">
+                    <PawPrint className="w-5 h-5 text-yellow-400 fill-yellow-400/30" />
+                  </div>
+                </div>
+
+                {/* Content */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <span className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-[0.15em] text-yellow-400">
+                      <Bell className="w-2.5 h-2.5" /> Paw Points Request
+                    </span>
+                    <span className="text-[10px] text-gray-600 ml-auto">Just now</span>
+                  </div>
+                  <p className="text-white font-bold text-sm truncate">{toast.patient}</p>
+                  <p className="text-gray-400 text-xs truncate">{toast.service}</p>
+                  <div className="mt-2 inline-flex items-center gap-1.5 bg-yellow-500/10 border border-yellow-500/20 px-2.5 py-1 rounded-full">
+                    <PawPrint className="w-3 h-3 text-yellow-400 fill-yellow-400/30" />
+                    <span className="text-yellow-400 font-black text-sm">+{toast.pointsValue}</span>
+                    <span className="text-yellow-400/60 text-xs font-bold">pts pending approval</span>
+                  </div>
+                </div>
+
+                {/* Dismiss */}
+                <button
+                  onClick={() => dismissToast(toast.id)}
+                  className="shrink-0 p-1 text-gray-600 hover:text-gray-300 transition-colors rounded-lg hover:bg-white/5"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
     </motion.div>
   );
 }
+
