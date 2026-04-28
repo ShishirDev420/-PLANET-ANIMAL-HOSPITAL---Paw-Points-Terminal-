@@ -1,22 +1,14 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { collection, query, where, onSnapshot, deleteDoc, doc, writeBatch, increment, getDocs, updateDoc } from 'firebase/firestore';
+import React, { useState, useEffect } from 'react';
+import { collection, query, where, onSnapshot, deleteDoc, doc, writeBatch, increment, getDocs } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, PawPrint, Bell, X } from 'lucide-react';
-
-interface ToastNotification {
-  id: string;
-  patient: string;
-  service: string;
-  pointsValue: number;
-}
+import { Search } from 'lucide-react';
 
 interface PointsRequest {
   id: string;
-  patient?: string;
-  petName?: string;
-  pointsValue: number;
-  service: string;
+  patient: string;
+  points: number;
+  reason: string;
   status: 'pending' | 'verified';
   createdAt?: any;
   date?: string;
@@ -34,57 +26,15 @@ interface UserDirectory {
 export default function Dashboard() {
   const [queue, setQueue] = useState<PointsRequest[]>([]);
   const [directory, setDirectory] = useState<UserDirectory[]>([]);
-  const [toasts, setToasts] = useState<ToastNotification[]>([]);
-  const seenRequestIdsRef = useRef<Set<string>>(new Set());
-  const isInitialLoadRef = useRef(true);
-
-  const dismissToast = (toastId: string) => {
-    setToasts(prev => prev.filter(t => t.id !== toastId));
-  };
-
-  const addToast = (request: PointsRequest) => {
-    const toast: ToastNotification = {
-      id: request.id,
-      patient: request.patient || request.petName || 'Unknown Patient',
-      service: request.service || 'Service',
-      pointsValue: request.pointsValue || 0,
-    };
-    setToasts(prev => [toast, ...prev].slice(0, 5)); // max 5 toasts
-    setTimeout(() => dismissToast(request.id), 6000); // auto-dismiss after 6s
-  };
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedUser, setSelectedUser] = useState<UserDirectory | null>(null);
-  const [customPoints, setCustomPoints] = useState<string>("");
-  const [isAddPointsModalOpen, setIsAddPointsModalOpen] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  const handleManualPointsInjection = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedUser || !customPoints || isNaN(Number(customPoints))) return;
-    try {
-      const userRef = doc(db, 'users', selectedUser.id);
-      await updateDoc(userRef, { pawPoints: increment(Number(customPoints)) });
-      setIsAddPointsModalOpen(false);
-      setCustomPoints("");
-      setSelectedUser(null);
-      fetchUsers();
-    } catch (error) {
-      console.error("Error adding manual points:", error);
-      alert("Failed to add points.");
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(null), 4000);
+      return () => clearTimeout(timer);
     }
-  };
-
-  const fetchUsers = async () => {
-    try {
-      const querySnapshot = await getDocs(collection(db, 'users'));
-      const users: UserDirectory[] = [];
-      querySnapshot.forEach((doc) => {
-        users.push({ id: doc.id, ...doc.data() } as UserDirectory);
-      });
-      setDirectory(users);
-    } catch (error) {
-      console.error("Error fetching users:", error);
-    }
-  };
+  }, [toast]);
 
   useEffect(() => {
     // Listen to the requests collection in real-time
@@ -94,8 +44,8 @@ export default function Dashboard() {
     );
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const requests: PointsRequest[] = [];
-      snapshot.forEach((docSnap) => {
-        requests.push({ id: docSnap.id, ...docSnap.data() } as PointsRequest);
+      snapshot.forEach((doc) => {
+        requests.push({ id: doc.id, ...doc.data() } as PointsRequest);
       });
       
       // Sort manually to prevent orderBy index failures inside Firebase
@@ -104,31 +54,28 @@ export default function Dashboard() {
         const timeB = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0;
         return timeB - timeA;
       });
-
-      // Detect truly NEW requests (not seen before) and fire toast notifications
-      if (isInitialLoadRef.current) {
-        // Seed the seen set on first load — don't toast for pre-existing items
-        requests.forEach(r => seenRequestIdsRef.current.add(r.id));
-        isInitialLoadRef.current = false;
-      } else {
-        requests.forEach(r => {
-          if (!seenRequestIdsRef.current.has(r.id)) {
-            seenRequestIdsRef.current.add(r.id);
-            addToast(r);
-          }
-        });
-      }
       
       setQueue(requests);
     }, (error) => {
       console.error("Error fetching points queue:", error);
     });
 
-    // Fetch initial users directory
-    fetchUsers();
+    // Listen to the users directory in real-time
+    const unsubscribeUsers = onSnapshot(collection(db, 'users'), (snapshot) => {
+      const usersList = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as UserDirectory[];
+      setDirectory(usersList);
+    }, (error) => {
+      console.error("Error fetching users directory:", error);
+    });
 
-    // Cleanup listener on unmount
-    return () => unsubscribe();
+    // Cleanup listeners on unmount
+    return () => {
+      unsubscribe();
+      unsubscribeUsers();
+    };
   }, []);
 
   const handleApprove = async (request: PointsRequest) => {
@@ -142,17 +89,24 @@ export default function Dashboard() {
       // 2. Increment the user's Paw Points
       if (request.userId) {
         const userRef = doc(db, 'users', request.userId);
-        batch.update(userRef, { pawPoints: increment(request.pointsValue || 0) });
+        batch.update(userRef, { pawPoints: increment(request.points) });
       }
 
       // 3. Commit the transaction
       await batch.commit();
 
-      // Refresh directory locally to show updated points quickly
-      fetchUsers();
+      setToast({ 
+        message: `Success! ${request.points} Paw Points awarded to ${request.patient || 'patient'}.`, 
+        type: 'success' 
+      });
+
+      // Directory updates automatically via onSnapshot listener
     } catch (error) {
       console.error("Error committing batch: ", error);
-      alert("Transaction failed. Please try again.");
+      setToast({ 
+        message: "Transaction failed. Missing or insufficient permissions.", 
+        type: 'error' 
+      });
     }
   };
 
@@ -180,8 +134,30 @@ export default function Dashboard() {
     <motion.div 
       initial={{ opacity: 0 }} 
       animate={{ opacity: 1 }} 
-      className="min-h-screen bg-[#0A0A0A] text-white font-sans selection:bg-yellow-500/30"
+      className="min-h-screen bg-[#0A0A0A] text-white font-sans selection:bg-yellow-500/30 relative"
     >
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ opacity: 0, y: -20, x: '-50%' }}
+            animate={{ opacity: 1, y: 0, x: '-50%' }}
+            exit={{ opacity: 0, y: -20, x: '-50%' }}
+            className={`fixed top-24 left-1/2 z-[100] px-6 py-3 rounded-full shadow-2xl border font-medium text-sm backdrop-blur-md flex items-center gap-2 ${
+              toast.type === 'success' 
+                ? 'bg-green-500/10 border-green-500/30 text-green-400' 
+                : 'bg-red-500/10 border-red-500/30 text-red-500'
+            }`}
+          >
+            {toast.type === 'success' ? (
+              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+            ) : (
+              <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+            )}
+            {toast.message}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Header */}
       <header className="bg-[#0A0A0A]/80 backdrop-blur-md border-b border-gray-800 px-6 py-4 flex items-center justify-between sticky top-0 z-50">
         <div className="flex items-center gap-4">
@@ -273,8 +249,8 @@ export default function Dashboard() {
                           transition={{ type: "spring", stiffness: 400, damping: 30 }}
                           className="hover:bg-[#18181A] transition-colors group"
                         >
-                          <td className="px-6 py-4 font-medium text-white">{request.patient || request.petName || 'Unknown Patient'}</td>
-                          <td className="px-6 py-4 text-gray-500">{request.service || 'No service provided'}</td>
+                          <td className="px-6 py-4 font-medium text-white">{request.patient || 'Unknown Patient'}</td>
+                          <td className="px-6 py-4 text-gray-500">{request.reason || 'No reason provided'}</td>
                           <td className="px-6 py-4 text-gray-500 font-mono text-xs">
                             {request.date && request.time 
                               ? `${request.date} / ${request.time}`
@@ -283,7 +259,7 @@ export default function Dashboard() {
                                 : 'N/A'}
                           </td>
                           <td className="px-6 py-4 font-bold text-yellow-400 text-base drop-shadow-[0_0_8px_rgba(250,204,21,0.3)]">
-                            +{request.pointsValue || 0}
+                            +{request.points || 0}
                           </td>
                           <td className="px-6 py-4 text-right">
                             <div className="flex items-center justify-end gap-3 opacity-90 group-hover:opacity-100 transition-opacity">
@@ -338,7 +314,7 @@ export default function Dashboard() {
                     <th className="px-6 py-4">Pet Name</th>
                     <th className="px-6 py-4">Owner Email</th>
                     <th className="px-6 py-4">Lifetime Paw Points</th>
-                    <th className="px-6 py-4 text-right">Actions / CRM ID</th>
+                    <th className="px-6 py-4 text-right">CRM ID</th>
                   </tr>
                 </thead>
                 <motion.tbody className="divide-y divide-gray-800/50">
@@ -372,17 +348,8 @@ export default function Dashboard() {
                           <td className="px-6 py-4 font-bold text-yellow-500 drop-shadow-[0_0_8px_rgba(250,204,21,0.2)]">
                             {user.pawPoints || 0}
                           </td>
-                          <td className="px-6 py-4 text-right flex flex-col items-end gap-2">
-                            <span className="text-[10px] uppercase text-gray-600 font-mono tracking-widest">{user.id}</span>
-                            <button
-                              onClick={() => {
-                                setSelectedUser(user);
-                                setIsAddPointsModalOpen(true);
-                              }}
-                              className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-[#0A0A0A] bg-yellow-500 rounded border border-yellow-400 hover:bg-yellow-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-[#121212] focus:ring-yellow-500 transition-all shadow-[0_0_15px_rgba(250,204,21,0.15)]"
-                            >
-                              + Add Points
-                            </button>
+                          <td className="px-6 py-4 text-right text-[10px] uppercase text-gray-600 font-mono tracking-widest">
+                            {user.id}
                           </td>
                         </motion.tr>
                       ))
@@ -394,118 +361,6 @@ export default function Dashboard() {
           </div>
         </section>
       </main>
-
-      <AnimatePresence>
-        {isAddPointsModalOpen && selectedUser && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-          >
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="bg-[#121212] border border-gray-800 shadow-2xl rounded-2xl p-6 w-full max-w-sm relative"
-            >
-              <h3 className="text-xl font-bold text-white mb-2">Inject Paw Points</h3>
-              <p className="text-sm text-gray-400 mb-6">Patient: <span className="text-white font-semibold">{selectedUser.petName || 'Unknown'}</span></p>
-              
-              <form onSubmit={handleManualPointsInjection} className="space-y-4">
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 mb-1 uppercase tracking-wider">Points to Add</label>
-                  <input 
-                    type="number"
-                    value={customPoints}
-                    onChange={(e) => setCustomPoints(e.target.value)}
-                    placeholder="e.g. 500"
-                    className="w-full bg-[#1A1A1C] border border-gray-800 rounded-lg px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-yellow-500/50 focus:ring-1 focus:ring-yellow-500/50 transition-all text-lg font-bold"
-                    autoFocus
-                  />
-                </div>
-                
-                <div className="flex gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsAddPointsModalOpen(false);
-                      setCustomPoints("");
-                      setSelectedUser(null);
-                    }}
-                    className="flex-1 py-3 bg-transparent border border-gray-700 text-gray-300 font-bold rounded-xl hover:bg-gray-800 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={!customPoints || isNaN(Number(customPoints))}
-                    className="flex-1 py-3 bg-yellow-500 text-black font-bold rounded-xl hover:bg-yellow-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Confirm
-                  </button>
-                </div>
-              </form>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* 🐾 LIVE PAW POINTS NOTIFICATION TOASTS */}
-      <div className="fixed top-6 right-6 z-[200] flex flex-col gap-3 pointer-events-none">
-        <AnimatePresence mode="popLayout">
-          {toasts.map((toast) => (
-            <motion.div
-              key={toast.id}
-              layout
-              initial={{ opacity: 0, x: 80, scale: 0.9 }}
-              animate={{ opacity: 1, x: 0, scale: 1 }}
-              exit={{ opacity: 0, x: 80, scale: 0.9, transition: { duration: 0.2 } }}
-              transition={{ type: 'spring', stiffness: 400, damping: 30 }}
-              className="pointer-events-auto w-[340px] bg-[#0E0E0E] border border-yellow-500/30 rounded-2xl shadow-[0_0_40px_rgba(250,204,21,0.15),0_8px_32px_rgba(0,0,0,0.6)] overflow-hidden"
-            >
-              {/* Yellow top accent line */}
-              <div className="h-1 w-full bg-gradient-to-r from-yellow-500 via-yellow-400 to-yellow-500 animate-pulse" />
-              
-              <div className="p-4 flex items-start gap-3">
-                {/* Paw icon with glow */}
-                <div className="relative shrink-0">
-                  <div className="absolute inset-0 bg-yellow-500/30 blur-xl rounded-full scale-150" />
-                  <div className="relative w-10 h-10 bg-yellow-500/10 border border-yellow-500/30 rounded-xl flex items-center justify-center">
-                    <PawPrint className="w-5 h-5 text-yellow-400 fill-yellow-400/30" />
-                  </div>
-                </div>
-
-                {/* Content */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-0.5">
-                    <span className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-[0.15em] text-yellow-400">
-                      <Bell className="w-2.5 h-2.5" /> Paw Points Request
-                    </span>
-                    <span className="text-[10px] text-gray-600 ml-auto">Just now</span>
-                  </div>
-                  <p className="text-white font-bold text-sm truncate">{toast.patient}</p>
-                  <p className="text-gray-400 text-xs truncate">{toast.service}</p>
-                  <div className="mt-2 inline-flex items-center gap-1.5 bg-yellow-500/10 border border-yellow-500/20 px-2.5 py-1 rounded-full">
-                    <PawPrint className="w-3 h-3 text-yellow-400 fill-yellow-400/30" />
-                    <span className="text-yellow-400 font-black text-sm">+{toast.pointsValue}</span>
-                    <span className="text-yellow-400/60 text-xs font-bold">pts pending approval</span>
-                  </div>
-                </div>
-
-                {/* Dismiss */}
-                <button
-                  onClick={() => dismissToast(toast.id)}
-                  className="shrink-0 p-1 text-gray-600 hover:text-gray-300 transition-colors rounded-lg hover:bg-white/5"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            </motion.div>
-          ))}
-        </AnimatePresence>
-      </div>
     </motion.div>
   );
 }
-
